@@ -509,38 +509,51 @@ def renderizar_mapa_motorizados():
     st.divider()
 
     # — Última posición GPS --------------------------------------------------
+    # La app escribe en ubicaciones_motorizados; el dashboard lo lee por las
+    # vistas vista_ultima_posicion / vista_recorrido_hoy (SQL 06), que ya
+    # traen el nombre del motorizado.
     st.subheader("📡 Última Posición GPS Registrada")
     try:
-        res_ub = (
-            supabase.table("ubicaciones")
-            .select("latitud, longitud, motorizado_id, timestamp")
-            .order("timestamp", desc=True)
-            .limit(20)
+        res_ub = supabase.table("vista_ultima_posicion").select("*").execute()
+        if res_ub.data:
+            df_last = pd.DataFrame(res_ub.data)
+            df_last["hace_minutos"] = pd.to_numeric(df_last.get("hace_minutos"), errors="coerce")
+            df_last["estado"] = df_last["hace_minutos"].apply(
+                lambda m: "🟢 en línea" if pd.notna(m) and m <= 5
+                else ("🟡 hace poco" if pd.notna(m) and m <= 30 else "⚪ sin señal reciente")
+            )
+            st.dataframe(
+                df_last[["estado", "motorizado", "ultima_senal", "hace_minutos", "latitud", "longitud"]]
+                .rename(columns={"motorizado": "Motorizado", "ultima_senal": "Última señal",
+                                 "hace_minutos": "Hace (min)", "estado": "Estado"}),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("Ningún motorizado ha transmitido su posición todavía. "
+                    "En la app, la tarjeta de rastreo arranca sola cuando hay paradas pendientes "
+                    "(o con el botón Iniciar).")
+
+        # Recorrido de hoy en el mapa
+        res_rec = (
+            supabase.table("vista_recorrido_hoy")
+            .select("motorizado, latitud, longitud, created_at")
+            .limit(3000)
             .execute()
         )
-        if res_ub.data:
-            df_ub = pd.DataFrame(res_ub.data).rename(
-                columns={"latitud": "lat", "longitud": "lon"}
-            )
-            # Última posición por motorizado
-            df_ub["motorizado_id"] = df_ub["motorizado_id"].astype(str)
-            df_last = (
-                df_ub.drop_duplicates(subset=["motorizado_id"])
-                .reset_index(drop=True)
-            )
-            st.dataframe(df_last, use_container_width=True, hide_index=True)
-
-            # Mini-mapa de posición actual
-            df_ub["lat"] = pd.to_numeric(df_ub["lat"], errors="coerce")
-            df_ub["lon"] = pd.to_numeric(df_ub["lon"], errors="coerce")
-            df_ub = df_ub.dropna(subset=["lat", "lon"])
-            if not df_ub.empty:
-                st.map(df_ub, latitude="lat", longitude="lon",
-                       zoom=12, use_container_width=True)
-        else:
-            st.info("No hay coordenadas transmitidas recientemente.")
+        if res_rec.data:
+            df_rec = pd.DataFrame(res_rec.data).rename(columns={"latitud": "lat", "longitud": "lon"})
+            df_rec["lat"] = pd.to_numeric(df_rec["lat"], errors="coerce")
+            df_rec["lon"] = pd.to_numeric(df_rec["lon"], errors="coerce")
+            df_rec = df_rec.dropna(subset=["lat", "lon"])
+            if not df_rec.empty:
+                st.caption(f"Recorrido de hoy · {len(df_rec)} posiciones")
+                st.map(df_rec, latitude="lat", longitude="lon", zoom=12, use_container_width=True)
     except Exception as e:
-        st.warning(f"No se pudo leer tabla 'ubicaciones': {e}")
+        st.warning(
+            "No se pudieron leer las posiciones GPS. Si el mensaje habla de "
+            "'vista_ultima_posicion', falta ejecutar el archivo 06 en Supabase. "
+            f"Detalle: {e}"
+        )
 
 
 # ---------------------------------------------------------
