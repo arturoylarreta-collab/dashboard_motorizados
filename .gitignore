@@ -1,0 +1,7 @@
+# secretos: nunca al repo
+.env
+# basura de ejecución
+__pycache__/
+*.pyc
+vendu_logistica.db
+uploads/

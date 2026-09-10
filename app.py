@@ -1,4 +1,5 @@
 import os
+import html as _html
 from datetime import datetime
 import pandas as pd
 import pydeck as pdk
@@ -24,11 +25,47 @@ init_local_db()
 # ---------------------------------------------------------
 # CACHÉ DE EPAY Y SUPABASE
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
-def obtener_estatus_epay_cached(phpsessid):
-    if not phpsessid or phpsessid == "tu_session_id_aqui":
+@st.cache_data(ttl=120)
+def obtener_estatus_epay_cached():
+    """Estatus online/offline de las máquinas en ePay.uno.
+
+    Misma lógica que la tool `estatus_maquinas` del MCP ePay.uno (cuenta
+    principal Vendu). Credenciales en los secrets de Streamlit Cloud:
+    EPAY_USER / EPAY_PASS. Fallback: EPAY_PHPSESSID pegado a mano.
+    Se cachea 2 minutos; el tablero (fragment cada 10 s) lo relee solo.
+    """
+    user = st.secrets.get("EPAY_USER", "")
+    pwd  = st.secrets.get("EPAY_PASS", "")
+    sess = st.secrets.get("EPAY_PHPSESSID", "")
+    if not (user and pwd) and not sess:
         return {}
-    return extraer_estatus_epay(phpsessid)
+    return extraer_estatus_epay(user=user, password=pwd, phpsessid=sess)
+
+
+def _selector_codigo_epay(label, actual="", key=None):
+    """Selectbox con los códigos reales de ePay.uno (si hay conexión); si no, texto libre."""
+    estatus = obtener_estatus_epay_cached()
+    codigos = sorted(k for k in estatus if k != "__meta__" and k)
+    actual  = (actual or "").strip()
+    if actual.lower() in ("nan", "none", "null"):
+        actual = ""
+    if not codigos:
+        return st.text_input(label, value=actual, key=key, placeholder="Ej: V07-CASH17")
+
+    SIN = "(sin código)"
+    opciones = [SIN] + codigos
+    if actual and actual not in codigos:
+        opciones.insert(1, actual)          # código viejo que ya no existe en ePay
+    idx = opciones.index(actual) if actual in opciones else 0
+
+    def _fmt(c):
+        if c == SIN:
+            return c
+        d = estatus.get(c, {})
+        return f'{d.get("color_badge", "⚪")} {c} · {d.get("descripcion", "")}'.strip()
+
+    sel = st.selectbox(label, opciones, index=idx, key=key, format_func=_fmt)
+    return "" if sel == SIN else sel
 
 
 @st.cache_resource
@@ -256,6 +293,13 @@ def cargar_maquinas():
             df["llave"] = df["llave"].fillna("N/A").replace("", "N/A")
         if "codigo_epay" not in df.columns:
             df["codigo_epay"] = ""
+        else:
+            # "nan" literal = NaN de pandas guardado como texto en ediciones previas
+            df["codigo_epay"] = (
+                df["codigo_epay"].fillna("").astype(str)
+                .replace({"nan": "", "None": "", "null": ""})
+                .str.strip()
+            )
         for c in ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado"]:
             if c in df.columns:
                 df[c] = df[c].astype(int)
@@ -710,8 +754,11 @@ st.markdown(
 # ---------------------------------------------------------
 @st.fragment(run_every=10)
 def renderizar_tablero_vertical(estatus_epay=None):
+    # El estatus se consulta DENTRO del fragment: así el punto 🟢/🔴 se
+    # refresca solo (cache de 2 min) sin recargar toda la página.
     if estatus_epay is None:
-        estatus_epay = {}
+        estatus_epay = obtener_estatus_epay_cached()
+    meta_epay = estatus_epay.get("__meta__", {})
 
     dt_now  = datetime.now()
     dia_num = dt_now.weekday()
@@ -764,9 +811,17 @@ def renderizar_tablero_vertical(estatus_epay=None):
             badge_estado = get_status_badge(m["estado"])
             badge_llave  = get_key_badge(m.get("llave", "N/A"))
 
-            code_epay  = m.get("codigo_epay", "")
-            info_epay  = estatus_epay.get(m["nombre"]) or estatus_epay.get(code_epay, {})
+            # 🟢 online en ePay · 🔴 offline (>1 h sin reportar) · ⚪ sin código o sin datos
+            code_epay  = (m.get("codigo_epay") or "").strip()
+            info_epay  = estatus_epay.get(code_epay, {}) if code_epay else {}
             epay_badge = info_epay.get("color_badge", "⚪")
+            if info_epay:
+                tip_epay = f'{info_epay["estado"]} en ePay · {code_epay} · {info_epay["descripcion"]}'
+            elif code_epay:
+                tip_epay = f'{code_epay}: sin datos de ePay'
+            else:
+                tip_epay = 'Sin código ePay asignado (Panel de Gestión)'
+            tip_epay = _html.escape(tip_epay, quote=True)
 
             c_l = get_cell(m["lunes"])
             c_m = get_cell(m["martes"])
@@ -779,7 +834,7 @@ def renderizar_tablero_vertical(estatus_epay=None):
 
             rows_list.append(
                 f'<tr class="{row_class}">'
-                f'<td class="location-name">{epay_badge} {m["nombre"]}'
+                f'<td class="location-name"><span title="{tip_epay}">{epay_badge}</span> {m["nombre"]}'
                 f' {badge_llave} {badge_estado}</td>'
                 f'<td style="text-align:center;">{badge_moto}</td>'
                 f'<td style="text-align:center;">{c_l}</td>'
@@ -811,6 +866,16 @@ def renderizar_tablero_vertical(estatus_epay=None):
         f'<div class="tv-grid">{tabla1_html}{tabla2_html}</div>',
         unsafe_allow_html=True,
     )
+    if meta_epay:
+        st.caption(
+            f"ePay.uno · 🟢 {meta_epay['online']} online · 🔴 {meta_epay['offline']} offline "
+            f"· ⚪ sin código · actualizado {meta_epay['consultado']}"
+        )
+    else:
+        st.caption(
+            "ePay.uno sin conexión (todos ⚪). Configura EPAY_USER y EPAY_PASS "
+            "en Settings → Secrets de Streamlit Cloud."
+        )
 
 
 # ---------------------------------------------------------
@@ -843,20 +908,17 @@ modo = st.sidebar.radio(
 # =============================================================
 
 if modo == "📱 Tablero TV (En Vivo)":
-    phpsessid    = st.secrets.get("EPAY_PHPSESSID", "tu_session_id_aqui")
-    estatus_epay = obtener_estatus_epay_cached(phpsessid)
-    renderizar_tablero_vertical(estatus_epay)
+    renderizar_tablero_vertical()
 
 # -------------------------------------------------------------
 elif modo == "📺 Tablero Snacky":
     st.title("📺 Tablero Logístico Snacky")
-    phpsessid    = st.secrets.get("EPAY_PHPSESSID", "tu_session_id_aqui")
-    estatus_epay = obtener_estatus_epay_cached(phpsessid)
+    estatus_epay = obtener_estatus_epay_cached()
 
     st.info("🟢 = Activa en ePay  |  🔴 = Inactiva / Offline  |  ⚪ = Sin Datos")
 
     maquinas_snacky = [
-        {"codigo_epay": "V07-CASH09", "nombre": "Cashea Piso 9",     "llave": "01"},
+        {"codigo_epay": "V07-CASH17", "nombre": "Cashea Piso 17",    "llave": "01"},
         {"codigo_epay": "V01-UCLABS", "nombre": "UCAB Laboratorios", "llave": "02"},
         {"codigo_epay": "V03-UCAP1",  "nombre": "UCAB Cinc. Piso 1", "llave": "03"},
         {"codigo_epay": "V25-UCV",    "nombre": "UCV Central",       "llave": "04"},
@@ -1111,8 +1173,8 @@ elif modo == "⚙️ Panel de Gestión":
                 moto_nuevo        = st.selectbox("Motorizado Asignado:", MOTORIZADOS_DISPONIBLES, index=0)
                 llave_nueva       = st.text_input("Tipo / Número de Llave:", value="N/A",
                                                   placeholder="Ej: 01, 02, Maestra (M), 01/02...")
-                codigo_epay_nuevo = st.text_input("Código ePay (Opcional):",
-                                                  placeholder="Ej: V07-CASH09")
+                codigo_epay_nuevo = _selector_codigo_epay("Código ePay (Opcional):",
+                                                          key="epay_nuevo")
                 st.write("**Días de Recarga:**")
                 c_l, c_m, c_x, c_j, c_v, c_s = st.columns(6)
                 l_val = c_l.checkbox("L", value=True)
@@ -1151,8 +1213,8 @@ elif modo == "⚙️ Panel de Gestión":
                         e_nombre      = st.text_input("Ubicación:", value=row["nombre"])
                         e_llave       = st.text_input("Tipo / N° de Llave:", value=row["llave"],
                                                       key=f"llave_{row['id']}")
-                        e_codigo_epay = st.text_input("Código ePay:", value=row.get("codigo_epay", ""),
-                                                      key=f"epay_{row['id']}")
+                        e_codigo_epay = _selector_codigo_epay("Código ePay:", row.get("codigo_epay", ""),
+                                                              key=f"epay_{row['id']}")
                         idx_moto = (
                             MOTORIZADOS_DISPONIBLES.index(row["motorizado"])
                             if row["motorizado"] in MOTORIZADOS_DISPONIBLES else 4
