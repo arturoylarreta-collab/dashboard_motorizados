@@ -1,5 +1,6 @@
 # secretos: nunca al repo
 .env
+.streamlit/secrets.toml
 # basura de ejecución
 __pycache__/
 *.pyc
