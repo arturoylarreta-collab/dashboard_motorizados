@@ -912,6 +912,7 @@ modo = st.sidebar.radio(
         "☕ Máquinas de Café",
         "🛵 App Motorizados",
         "📊 Dashboard Semanal",
+        "📦 Inventario",
     ],
 )
 
@@ -1304,3 +1305,18 @@ elif modo == "📊 Dashboard Semanal":
             st.dataframe(df_paradas, use_container_width=True, hide_index=True)
         else:
             st.info("No se han detectado paradas anómalas en el periodo.")
+
+# -------------------------------------------------------------
+# INVENTARIO (fase 1-2, 17-09-2026): tres almacenes, órdenes de recarga
+# con escritura en ePay, entradas y conteo de oficina, conciliación.
+# Vive en dashboard_vendu.py (schema `vendu`, conexión directa DATABASE_URL);
+# aquí solo se muestra dentro del tablero, con PIN de supervisor.
+# -------------------------------------------------------------
+elif modo == "📦 Inventario":
+    st.title("📦 Inventario y recargas")
+    try:
+        import dashboard_vendu as inventario
+    except Exception as ex:  # falta DATABASE_URL, psycopg2, etc.
+        st.error(f"El inventario no está disponible en este despliegue: {ex}")
+    else:
+        inventario.render_embebido()

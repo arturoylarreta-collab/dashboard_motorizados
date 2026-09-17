@@ -27,12 +27,16 @@ from epay_service import get_service
 import recarga
 
 
-st.set_page_config(
-    page_title="VENDU — Panel Operativo",
-    page_icon=":material/inventory_2:",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# Solo cuando este archivo se corre solo (`streamlit run dashboard_vendu.py`).
+# Cuando lo importa app.py (vista "📦 Inventario" del tablero), la página ya
+# está configurada allí y Streamlit no permite configurarla dos veces.
+if __name__ == "__main__":
+    st.set_page_config(
+        page_title="VENDU — Panel Operativo",
+        page_icon=":material/inventory_2:",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1329,38 +1333,72 @@ def exigir_pin() -> None:
     st.stop()
 
 
-exigir_pin()
+def _despachar(seccion: str, rango) -> None:
+    if seccion == "kpis":
+        desde, hasta = rango if len(rango) == 2 else _rango_30d()
+        sec_kpis(desde, hasta)
+    elif seccion == "inventario":
+        sec_inventario()
+    elif seccion == "planograma":
+        sec_planograma()
+    elif seccion == "recomendaciones":
+        sec_recomendaciones()
+    elif seccion == "ordenes":
+        sec_ordenes()
+    elif seccion == "conciliacion":
+        sec_conciliacion()
+    elif seccion == "auditoria":
+        sec_auditoria()
+    elif seccion == "sincronizacion":
+        sec_sincronizacion()
 
-with st.sidebar:
-    st.markdown("# :material/package_2: **VENDU**")
-    st.caption("Panel operativo — inventario y recargas")
-    if st.button("Salir", type="tertiary"):
-        st.session_state["pin_ok"] = False
-        st.rerun()
-    seccion = st.radio(
-        "Sección",
-        list(SECCIONES_NAV),
-        format_func=lambda k: SECCIONES_NAV[k],
-        label_visibility="collapsed",
-    )
-    rango = st.date_input("Rango de análisis", value=_rango_30d())
-    st.divider()
-    st.caption("Datos: schema `vendu` · Supabase")
 
-if seccion == "kpis":
-    desde, hasta = rango if len(rango) == 2 else _rango_30d()
-    sec_kpis(desde, hasta)
-elif seccion == "inventario":
-    sec_inventario()
-elif seccion == "planograma":
-    sec_planograma()
-elif seccion == "recomendaciones":
-    sec_recomendaciones()
-elif seccion == "ordenes":
-    sec_ordenes()
-elif seccion == "conciliacion":
-    sec_conciliacion()
-elif seccion == "auditoria":
-    sec_auditoria()
-elif seccion == "sincronizacion":
-    sec_sincronizacion()
+def render_panel() -> None:
+    """Panel independiente (`streamlit run dashboard_vendu.py`): PIN + menú lateral."""
+    exigir_pin()
+    with st.sidebar:
+        st.markdown("# :material/package_2: **VENDU**")
+        st.caption("Panel operativo — inventario y recargas")
+        if st.button("Salir", type="tertiary"):
+            st.session_state["pin_ok"] = False
+            st.rerun()
+        seccion = st.radio(
+            "Sección",
+            list(SECCIONES_NAV),
+            format_func=lambda k: SECCIONES_NAV[k],
+            label_visibility="collapsed",
+        )
+        rango = st.date_input("Rango de análisis", value=_rango_30d())
+        st.divider()
+        st.caption("Datos: schema `vendu` · Supabase")
+    _despachar(seccion, rango)
+
+
+def render_embebido() -> None:
+    """Vista "📦 Inventario" dentro del tablero de producción (app.py).
+
+    Mismas pantallas, sin tocar el menú lateral del tablero: la navegación va
+    arriba, en el área principal. Pide el PIN de supervisor igual que el panel.
+    """
+    exigir_pin()
+    c1, c2 = st.columns([4, 1])
+    with c1:
+        seccion = st.radio(
+            "Sección de inventario",
+            list(SECCIONES_NAV),
+            format_func=lambda k: SECCIONES_NAV[k],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="inv_seccion",
+        )
+    with c2:
+        if st.button("Salir del inventario", type="tertiary", key="inv_salir"):
+            st.session_state["pin_ok"] = False
+            st.rerun()
+    rango = st.date_input("Rango de análisis", value=_rango_30d(), key="inv_rango") \
+        if seccion == "kpis" else _rango_30d()
+    _despachar(seccion, rango)
+
+
+if __name__ == "__main__":
+    render_panel()
