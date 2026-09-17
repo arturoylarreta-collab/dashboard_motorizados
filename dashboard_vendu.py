@@ -62,6 +62,31 @@ def get_inventory() -> InventoryService:
     return InventoryService(get_db())
 
 
+def _epay_escritura_configurada() -> bool:
+    """True si hay token de ESCRITURA del MCP (MCP_WRITE_TOKEN). Con él, cerrar una
+    orden exige escribir la recarga en ePay; sin él, solo se mueve el libro local."""
+    try:
+        return bool(str(st.secrets.get("MCP_WRITE_TOKEN", "") or "").strip())
+    except Exception:
+        return bool(os.getenv("MCP_WRITE_TOKEN", "").strip())
+
+
+@st.cache_resource
+def get_epay_sync():
+    """EpaySync con el token de escritura (o None si no está configurado)."""
+    from epay_service import EpayService
+    from epay_sync import EpaySync
+    try:
+        url = st.secrets.get("MCP_URL", "")
+        token = st.secrets.get("MCP_WRITE_TOKEN", "")
+    except Exception:
+        url = os.getenv("MCP_URL", "")
+        token = os.getenv("MCP_WRITE_TOKEN", "")
+    if not url or not token:
+        return None
+    return EpaySync(get_db(), EpayService(url, token))
+
+
 @st.cache_resource
 def get_recomendaciones() -> RecomendacionesService:
     return RecomendacionesService(get_db())
@@ -500,6 +525,8 @@ def sec_inventario():
                 width="stretch",
             )
 
+    _oficina_epay()
+
     with st.expander(":material/rule: Verificar libro contra movimientos"):
         locs = bal.drop_duplicates("location_id")[["location_id", "tipo", "ubicacion"]]
         if not locs.empty:
@@ -550,6 +577,74 @@ def sec_inventario():
                 },
                 hide_index=True, width="stretch",
             )
+
+
+def _oficina_epay() -> None:
+    """Entradas de mercancía y conteo de la oficina, espejados en el almacén de ePay."""
+    sync = get_epay_sync()
+    prods = cargar_productos()
+    if prods.empty:
+        return
+    activos = prods[prods["activo"] == True] if "activo" in prods.columns else prods  # noqa: E712
+    etiquetas = {int(r["id"]): f"{r['nombre']} ({r['codigo_epay'] or 'sin código'})" for _, r in activos.iterrows()}
+    ids = list(etiquetas)
+    con_epay = sync is not None
+    if not con_epay:
+        st.warning("Sin token de escritura del MCP: las entradas y conteos solo se registran en Vendu, no en ePay.")
+
+    c1, c2 = st.columns(2)
+    with c1, st.expander(":material/add_box: Registrar entrada de mercancía a la oficina"):
+        with st.form("entrada_oficina"):
+            pid = st.selectbox("Producto:", ids, format_func=lambda i: etiquetas[i], key="ent_pid")
+            cant = st.number_input("Unidades que entran:", min_value=1, step=1, value=1, key="ent_cant")
+            nota = st.text_input("Nota (factura, proveedor):", key="ent_nota")
+            if st.form_submit_button(":material/save: Registrar entrada", type="primary"):
+                try:
+                    if con_epay:
+                        r = sync.registrar_entrada(product_id=int(pid), cantidad=float(cant), usuario="dashboard", nota=nota or None)
+                        ep = r.get("epay") or {}
+                        if ep.get("estado") == "OK":
+                            st.success(f"Entrada registrada en Vendu y en el almacén de ePay ({ep['respuesta'].get('modo', 'ok')}).")
+                        else:
+                            st.warning(f"Entrada registrada en Vendu; ePay quedó PENDIENTE: {ep.get('error')}")
+                    else:
+                        get_inventory().entrada_compra(product_id=int(pid), cantidad=float(cant), usuario="dashboard")
+                        st.success("Entrada registrada en Vendu.")
+                    st.cache_data.clear()
+                except Exception as ex:
+                    st.error(f"No se registró: {ex}")
+    with c2, st.expander(":material/fact_check: Conteo físico de la oficina (arranque y auditoría)"):
+        st.caption("Fija el stock de la oficina en Vendu y, si hay token, el almacén de ePay = contado + lo que va en los bolsos.")
+        with st.form("conteo_oficina"):
+            pid2 = st.selectbox("Producto:", ids, format_func=lambda i: etiquetas[i], key="cnt_pid")
+            contado = st.number_input("Unidades contadas en la oficina:", min_value=0, step=1, value=0, key="cnt_cant")
+            nota2 = st.text_input("Nota:", key="cnt_nota", value="Conteo de oficina")
+            if st.form_submit_button(":material/save: Aplicar conteo", type="primary"):
+                try:
+                    if con_epay:
+                        r = sync.conteo_oficina(product_id=int(pid2), contado=float(contado), usuario="dashboard", nota=nota2 or None)
+                        ep = r.get("epay") or {}
+                        msg = (f"Vendu: {r['saldo_anterior']:g} → {r['contado']:g} (ajuste {r['ajuste']:+g}); "
+                               f"bolsos en ruta {r['bolsos_en_ruta']:g}; ePay: {ep.get('estado')}")
+                        st.success(msg) if ep.get("estado") == "OK" else st.warning(msg + f" · {ep.get('error')}")
+                    else:
+                        from epay_sync import EpaySync
+                        r = EpaySync(get_db(), None).conteo_oficina(product_id=int(pid2), contado=float(contado),
+                                                                     usuario="dashboard", nota=nota2 or None, escribir_epay=False)
+                        st.success(f"Vendu: {r['saldo_anterior']:g} → {r['contado']:g} (ajuste {r['ajuste']:+g}).")
+                    st.cache_data.clear()
+                except Exception as ex:
+                    st.error(f"No se aplicó: {ex}")
+    if con_epay:
+        pend = sync.pendientes_almacen()
+        if pend:
+            st.warning(f"{len(pend)} ajuste(s) del almacén de ePay pendientes de sincronizar.")
+            st.dataframe(pd.DataFrame(pend)[["created_at", "producto", "modo", "cantidad", "estado", "intentos", "error"]],
+                         hide_index=True, width="stretch")
+            if st.button(":material/refresh: Reintentar pendientes"):
+                r = sync.reintentar_pendientes()
+                st.info(f"Reintento: {r['ok']} ok, {r['error']} con error.")
+                st.rerun()
 
 
 def sec_planograma():
@@ -784,6 +879,10 @@ def _detalle_orden(orden_id: int):
                           if e not in ("CANCELADA",)]
             if orden["estado"] in ("COMPLETADA", "CANCELADA"):
                 st.caption("Orden cerrada.")
+            # Cerrar la orden con recarga en ePay: 1) simular, 2) confirmar.
+            if "COMPLETADA" in permitidas and orden["motorizado_id"] and _epay_escritura_configurada():
+                permitidas = [e for e in permitidas if e != "COMPLETADA"]
+                _cerrar_con_epay(orden_id, orden, items)
             for e in permitidas:
                 if st.button(
                         f":material/arrow_forward: → {e.replace('_', ' ').title()}",
@@ -814,6 +913,15 @@ def _detalle_orden(orden_id: int):
                         st.rerun()
                     except Exception as ex:
                         st.error(f"No se pudo cambiar a {e}: {ex}")
+            if orden.get("epay_lote"):
+                st.caption(f"Recarga escrita en ePay · lote `{orden['epay_lote']}`")
+                if orden["estado"] == "COMPLETADA" and st.button(
+                        ":material/undo: Revertir recarga en ePay", key=f"rev_{orden_id}"):
+                    try:
+                        r = get_epay_sync().revertir_recarga(orden_id, usuario="dashboard")
+                        st.success(f"Revertido en ePay: {r.get('modo', r)}")
+                    except Exception as ex:
+                        st.error(f"No se pudo revertir: {ex}")
             if orden["estado"] not in ("COMPLETADA", "CANCELADA", "EN_RUTA"):
                 if st.button(":material/cancel: Cancelar",
                              key=f"cancel_{orden_id}"):
@@ -823,6 +931,46 @@ def _detalle_orden(orden_id: int):
                         st.rerun()
                     except Exception as ex:
                         st.error(f"No se pudo cancelar: {ex}")
+
+
+def _cerrar_con_epay(orden_id: int, orden: dict, items: pd.DataFrame) -> None:
+    """Cierre en dos pasos: simular la recarga en ePay, mostrar el plan, confirmar.
+    Si ePay falla, la orden sigue EN_MAQUINA y no se mueve nada (Plan 1, regla dura)."""
+    colocadas = {str(r["product_id"]): float(r["cantidad_llevada"]) for _, r in items.iterrows()}
+    clave_plan = f"plan_epay_{orden_id}"
+    sync = get_epay_sync()
+    st.markdown("**Cerrar orden: recarga en ePay**")
+    if st.button(":material/preview: 1. Simular en ePay", key=f"sim_{orden_id}"):
+        try:
+            with st.spinner("Consultando ePay..."):
+                st.session_state[clave_plan] = sync.plan_recarga(orden_id, colocadas, usuario="dashboard")
+        except Exception as ex:
+            st.session_state.pop(clave_plan, None)
+            st.error(f"ePay no aceptó la simulación: {ex}")
+    plan = st.session_state.get(clave_plan)
+    if plan:
+        p = plan.get("plan") or {}
+        st.caption(f"Simulación: {p.get('modo', '')} · unidades netas {p.get('unidades_netas', '')}")
+        filas = p.get("plan") or []
+        if filas:
+            st.dataframe(pd.DataFrame(filas), hide_index=True, width="stretch")
+        efecto = p.get("efecto_almacen") or []
+        if efecto:
+            st.caption("Sale del almacén de ePay: " + ", ".join(
+                f"{e.get('producto', e.get('codigo'))}: {e.get('sale_del_almacen')}" for e in efecto))
+        if st.button(":material/check_circle: 2. Confirmar en ePay y cerrar la orden",
+                     type="primary", key=f"conf_{orden_id}"):
+            try:
+                with st.spinner("Escribiendo en ePay y cerrando la orden..."):
+                    res = recarga.completar_y_mover(get_db(), orden_id, colocadas,
+                                                    usuario="dashboard", epay=sync)
+                st.session_state.pop(clave_plan, None)
+                lote = (res.get("epay") or {}).get("lote")
+                st.toast(f"Orden #{orden_id} COMPLETADA · lote ePay {lote}", icon=":material/check:")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as ex:
+                st.error(f"No se cerró la orden (sigue EN_MAQUINA): {ex}")
 
 
 def _crear_orden():
@@ -936,6 +1084,25 @@ def sec_conciliacion():
         st.cache_data.clear()
         st.rerun()
 
+    with st.expander(":material/warehouse: Oficina + bolsos en ruta vs almacén de ePay"):
+        st.caption("Regla de cuadre: almacén de ePay = oficina en Vendu + lo que llevan los motorizados.")
+        sync = get_epay_sync()
+        if sync is None:
+            st.info("Sin token de escritura del MCP no se consulta el almacén de ePay.")
+        elif st.button(":material/compare_arrows: Comparar ahora", key="cmp_almacen"):
+            try:
+                with st.spinner("Leyendo el almacén de ePay..."):
+                    filas = sync.comparar_almacen()
+                if filas:
+                    dfc = pd.DataFrame(filas)
+                    n_dif = int((dfc["estado"] == "DIFERENCIA").sum())
+                    st.metric("Productos con diferencia", n_dif, border=True, delta_color="inverse")
+                    st.dataframe(dfc, hide_index=True, width="stretch")
+                else:
+                    st.info("Nada que comparar todavía (sin stock en la oficina ni en los bolsos).")
+            except Exception as ex:
+                st.error(f"No se pudo comparar: {ex}")
+
     if not reconc.empty:
         st.subheader("Resultado de la última corrida")
         stado_f = st.selectbox("Estado:", ["Todos", "OK", "DIFERENCIA"],
@@ -964,8 +1131,46 @@ def sec_conciliacion():
         st.info("Sin datos de conciliación.")
 
 
+def _movimientos_epay() -> None:
+    """Qué pasó con un producto en ePay: recargas (TI), cambios de canal, ventas.
+    Sirve para ver si alguien recargó desde el portal en vez de la app."""
+    with st.expander(":material/travel_explore: Movimientos en ePay de un producto (recargas desde el portal, cambios de canal)"):
+        sync = get_epay_sync()
+        if sync is None:
+            st.info("Sin token de escritura del MCP no se consultan los movimientos de ePay.")
+            return
+        prods = cargar_productos()
+        if prods.empty:
+            return
+        etiquetas = {str(r["codigo_epay"]): f"{r['nombre']} ({r['codigo_epay']})"
+                     for _, r in prods.iterrows() if r["codigo_epay"]}
+        codigo = st.selectbox("Producto:", list(etiquetas), format_func=lambda c: etiquetas[c], key="mov_epay_prod")
+        sin_ventas = st.checkbox("Ocultar ventas (solo recargas y cambios)", value=True, key="mov_epay_sv")
+        if st.button(":material/search: Consultar en ePay", key="mov_epay_btn"):
+            try:
+                with st.spinner("Consultando ePay..."):
+                    raw = sync.svc.movimientos_producto(codigo, sin_ventas=sin_ventas)
+                datos = raw.get("datos") or raw.get("movimientos") or (raw if isinstance(raw, list) else [])
+                if datos:
+                    st.dataframe(pd.DataFrame(datos), hide_index=True, width="stretch")
+                else:
+                    st.info("Sin movimientos recientes para ese producto.")
+            except Exception as ex:
+                st.error(f"No se pudo consultar: {ex}")
+    with st.expander(":material/cloud_upload: Recargas escritas en ePay desde este dashboard"):
+        rec = query(
+            "SELECT r.created_at, r.orden_id, m.nombre AS maquina, r.modo, r.lote, r.usuario, r.error "
+            "FROM vendu.epay_recargas r LEFT JOIN public.maquinas m ON m.id = r.maquina_id "
+            "ORDER BY r.created_at DESC LIMIT 100")
+        if rec.empty:
+            st.caption("Todavía no se ha escrito ninguna recarga en ePay desde aquí.")
+        else:
+            st.dataframe(rec, hide_index=True, width="stretch")
+
+
 def sec_auditoria():
     st.title(":material/receipt_long: Auditoría")
+    _movimientos_epay()
     tab1, tab2 = st.tabs([":material/history: Bitácora", ":material/timeline: Órdenes"])
     with tab1:
         audit = cargar_audit(200)

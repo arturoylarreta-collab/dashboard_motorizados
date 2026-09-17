@@ -125,12 +125,17 @@ def crear_desde_recomendaciones(db: DB, maquina_id: int,
 def completar_y_mover(db: DB, orden_id: int,
                       colocadas: Dict[str, float],
                       motorizado_id: Optional[str] = None,
-                      usuario: Optional[str] = None) -> Dict:
+                      usuario: Optional[str] = None,
+                      epay=None) -> Dict:
     """Genera los RECARGA_MAQUINA por slot y cierra la orden en COMPLETADA.
 
     `colocadas` mapea product_id → cantidad realmente colocada (total).
     El reparto por slot se recalcula con repartir_por_slots; cada movimiento
     lleva idempotency `rec-<orden>-<slot>` (reintentos no duplican).
+
+    `epay` (EpaySync, opcional): si se pasa, PRIMERO se escribe la recarga en
+    ePay (idempotente por orden). Si ePay falla, no se mueve nada y la orden
+    sigue EN_MAQUINA. Solo los canales que ePay aceptó generan movimiento.
     """
     orden = OrderService(db).obtener(orden_id)
     if not motorizado_id:
@@ -143,6 +148,12 @@ def completar_y_mover(db: DB, orden_id: int,
         {"product_id": pid, "cantidad": cant}
         for pid, cant in colocadas.items() if float(cant) > 0
     ])
+
+    resultado_epay = None
+    if epay is not None:
+        resultado_epay = epay.escribir_recarga(orden_id, colocadas, usuario=usuario)
+        ok = resultado_epay["canales_ok"]
+        reparto = [l for l in reparto if str(l["slot"]) in ok]
 
     inv = InventoryService(db)
     movimientos = []
@@ -161,4 +172,5 @@ def completar_y_mover(db: DB, orden_id: int,
                 idempotency_key=f"rec-{orden_id}-{l['slot']}",
             ))
         final = OrderService(db).completar(orden_id, colocadas, usuario)
-    return {"orden": final, "reparto": reparto, "movimientos": movimientos}
+    return {"orden": final, "reparto": reparto, "movimientos": movimientos,
+            "epay": resultado_epay}

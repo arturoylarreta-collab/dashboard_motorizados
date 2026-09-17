@@ -147,7 +147,8 @@ class EpayService:
                     },
                     with_session=True,
                 )
-                payload = json.loads(_sse_payload(resp.text))
+                # El MCP responde UTF-8; `resp.text` adivinaba latin-1 y rompía los acentos.
+                payload = json.loads(_sse_payload(resp.content.decode("utf-8", "replace")))
                 result = payload.get("result") or {}
                 if result.get("isError"):
                     raise EpayError(
@@ -313,6 +314,83 @@ class EpayService:
     # ------------------------------------------------------------------ #
     # Helpers para el motor de recarga
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Tools de inventario del MCP de Vendu (17-09-2026). Las de escritura
+    # (recargar_maquina, revertir_recarga, cambiar_stock_almacen) SIMULAN por
+    # defecto (confirmar=False) y solo existen con el token de escritura.
+    # Contrato: vault EPAYUNO/HANDOFF-DASHBOARD-tools-MCP-epayuno-2026-09-17.
+    # ------------------------------------------------------------------ #
+    def resumen_recarga_maquinas(self, maquina_ids: List[int], dias: int = 14) -> Any:
+        """Stock, faltante, ventas/día y cobertura por canal de hasta 60 máquinas (1 llamada)."""
+        return self.call("resumen_recarga_maquinas",
+                         {"maquina_ids": [str(m) for m in maquina_ids], "dias": int(dias)})
+
+    def recargar_maquina(self, maquina_id: int, cambios: List[Dict[str, Any]], *,
+                         confirmar: bool = False, idempotencia: Optional[str] = None,
+                         nota: Optional[str] = None, forzar: bool = False) -> Dict[str, Any]:
+        """Registra en ePay la recarga (o el conteo) por canal.
+
+        cambios: [{"canal": "11", "sumar": 3}] (unidades colocadas) o
+                 [{"canal": "11", "fijar": 8}] (conteo final). Enteros.
+        confirmar=False -> simulación (plan + efecto en el almacén), no escribe.
+        confirmar=True  -> escribe, relee y devuelve {modo, lote, detalle[], revertir}.
+        """
+        args: Dict[str, Any] = {"maquina_id": str(maquina_id), "cambios": cambios,
+                                "confirmar": bool(confirmar), "forzar": bool(forzar)}
+        if idempotencia:
+            args["idempotencia"] = idempotencia
+        if nota:
+            args["nota"] = nota
+        raw = self.call("recargar_maquina", args)
+        return raw if isinstance(raw, dict) else {"resultado": raw}
+
+    def revertir_recarga(self, lote: str, *, confirmar: bool = False) -> Dict[str, Any]:
+        raw = self.call("revertir_recarga", {"lote": lote, "confirmar": bool(confirmar)})
+        return raw if isinstance(raw, dict) else {"resultado": raw}
+
+    def historial_recargas(self, maquina_id: Optional[int] = None, limite: int = 20) -> Any:
+        args: Dict[str, Any] = {"limite": int(limite)}
+        if maquina_id:
+            args["maquina_id"] = str(maquina_id)
+        return self.call("historial_recargas", args)
+
+    def stock_almacen(self, texto: Optional[str] = None, solo_negativos: bool = False,
+                      solo_activos: bool = True) -> List[Dict[str, Any]]:
+        """Almacén central de ePay (campo Cantidad por producto)."""
+        args: Dict[str, Any] = {"solo_negativos": bool(solo_negativos),
+                                "solo_activos": bool(solo_activos)}
+        if texto:
+            args["texto"] = texto
+        raw = self.call("stock_almacen", args)
+        return raw.get("datos", []) if isinstance(raw, dict) else []
+
+    def cambiar_stock_almacen(self, producto: str, *, sumar: Optional[float] = None,
+                              fijar: Optional[float] = None, confirmar: bool = False,
+                              nota: Optional[str] = None) -> Dict[str, Any]:
+        """Entrada de mercancía (sumar) o conteo (fijar) del almacén de ePay.
+        NUNCA para una recarga: ePay ya descuenta al recargar la máquina."""
+        if (sumar is None) == (fijar is None):
+            raise EpayError("Indica exactamente uno: sumar o fijar.")
+        args: Dict[str, Any] = {"producto": str(producto), "confirmar": bool(confirmar)}
+        if sumar is not None:
+            args["sumar"] = float(sumar)
+        else:
+            args["fijar"] = float(fijar)
+        if nota:
+            args["nota"] = nota
+        raw = self.call("cambiar_stock_almacen", args)
+        return raw if isinstance(raw, dict) else {"resultado": raw}
+
+    def movimientos_producto(self, producto: str, tipo: Optional[str] = None,
+                             maquina_id: Optional[int] = None, sin_ventas: bool = True) -> Any:
+        """Últimos movimientos de un producto en ePay (VE venta, TI recarga, cambios de canal)."""
+        args: Dict[str, Any] = {"producto": str(producto), "sin_ventas": bool(sin_ventas)}
+        if tipo:
+            args["tipo"] = tipo
+        if maquina_id:
+            args["maquina_id"] = str(maquina_id)
+        return self.call("movimientos_producto", args)
+
     def slots_snacks(self, maquina_id: int) -> List[Dict[str, Any]]:
         """Slots activos de una máquina snack, normalizados para el motor.
 
