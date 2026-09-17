@@ -146,17 +146,19 @@ def completar_y_mover(db: DB, orden_id: int,
 
     inv = InventoryService(db)
     movimientos = []
-    for l in reparto:
-        movimientos.append(inv.recargar_maquina(
-            motorizado_id=motorizado_id,
-            maquina_id=orden["maquina_id"],
-            product_id=l["product_id"],
-            cantidad=l["cantidad"],
-            orden_id=orden_id,
-            seleccion=l["seleccion"],
-            usuario=usuario,
-            idempotency_key=f"rec-{orden_id}-{l['slot']}",
-        ))
-
-    final = OrderService(db).completar(orden_id, colocadas, usuario)
+    # Todo o nada: si el cierre de la orden falla (p. ej. colocado > llevado)
+    # los movimientos no quedan aplicados a medias (fase 1, 17-09-2026).
+    with db.transaccion():
+        for l in reparto:
+            movimientos.append(inv.recargar_maquina(
+                motorizado_id=motorizado_id,
+                maquina_id=orden["maquina_id"],
+                product_id=l["product_id"],
+                cantidad=l["cantidad"],
+                orden_id=orden_id,
+                seleccion=l["seleccion"],
+                usuario=usuario,
+                idempotency_key=f"rec-{orden_id}-{l['slot']}",
+            ))
+        final = OrderService(db).completar(orden_id, colocadas, usuario)
     return {"orden": final, "reparto": reparto, "movimientos": movimientos}

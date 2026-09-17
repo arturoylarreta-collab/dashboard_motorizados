@@ -24,6 +24,7 @@ y nunca es negativa.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -120,7 +121,10 @@ def analizar(product_id: str,
         0.0,
         min(capacidad_libre, consumo_esperado + margen_seguridad - stock_actual),
     )
-    cantidad_recomendada = round(cantidad_recomendada, 2)
+    # Se recargan UNIDADES enteras: la necesidad se redondea hacia arriba
+    # (mejor sobrar una que faltar) sin pasar de la capacidad libre del canal.
+    cantidad_recomendada = float(min(math.ceil(cantidad_recomendada - 1e-9), math.floor(capacidad_libre + 1e-9)))
+    cantidad_recomendada = max(0.0, cantidad_recomendada)
 
     motivo, alerta = _motivo(
         stock_actual, minimo, consumo_diario, dias_cobertura,

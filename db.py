@@ -14,6 +14,7 @@ pooler de Supabase; una única conexión conmutó 30/30 operaciones.)
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
 import psycopg2
@@ -60,6 +61,22 @@ class DB:
             pass
         self._conn = None
 
+    @contextmanager
+    def transaccion(self):
+        """Bloque todo-o-nada sobre la conexión persistente (que va en autocommit).
+        Uso:  with db.transaccion(): ...varias escrituras...
+        Si algo falla se hace ROLLBACK de todo y se relanza el error."""
+        conn = self._connect()
+        conn.autocommit = False
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
+
     def _rollback(self) -> None:
         try:
             if self._conn is not None and not self._conn.closed:
@@ -87,6 +104,25 @@ class DB:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(sql, params)
                     return [dict(r) for r in cur.fetchall()]
+            raise
+
+    def query_con_columnas(self, sql: str, params: Optional[tuple] = None
+                           ) -> tuple[List[Dict[str, Any]], List[str]]:
+        """Como `query`, pero devuelve también los nombres de columna.
+        Con una tabla vacía `query` devuelve [] y un DataFrame armado desde
+        eso no tiene columnas: cualquier `df["col"]` explota. Con las columnas
+        del cursor el DataFrame vacío conserva su estructura."""
+        def _run(conn):
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                cols = [d.name for d in (cur.description or [])]
+                return [dict(r) for r in cur.fetchall()], cols
+        try:
+            return _run(self._connect())
+        except Exception as ex:
+            if self._transitorio(ex):
+                self._close()
+                return _run(self._connect())
             raise
 
     def one(self, sql: str, params: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
@@ -155,8 +191,9 @@ class DB:
         update = update if update is not None else [c for c in cols if c not in conflict]
         set_sql = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update)
         conflict_sql = ", ".join(f'"{c}"' for c in conflict)
+        cols_sql = ", ".join(f'"{c}"' for c in cols)   # fuera de la f-string: Python 3.11 no acepta \" dentro
         sql = (
-            f"INSERT INTO {_SCHEMA}.{table} ({', '.join('\"'+c+'\"' for c in cols)}) "
+            f"INSERT INTO {_SCHEMA}.{table} ({cols_sql}) "
             f"VALUES %s "
             f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql}"
         )

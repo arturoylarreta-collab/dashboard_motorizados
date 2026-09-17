@@ -167,13 +167,32 @@ class OrderService:
     def entregar_al_motorizado(self, orden_id: int,
                                entregadas: Dict[str, float],
                                usuario: Optional[str] = None) -> dict:
-        """Registra lo realmente entregado al motorizado (puede diferir de lo ordenado)."""
+        """Registra lo realmente entregado al motorizado (puede diferir de lo ordenado)
+        y MUEVE ese stock de la oficina (PRINCIPAL) al bolso del motorizado.
+
+        Sin este movimiento el bolso queda en cero y la recarga de la máquina
+        falla con "inventario negativo en origen" (fase 1, 17-09-2026).
+        Idempotente por orden y producto (`ent-<orden>-<producto>`).
+        """
+        from inventory import InventoryService  # import local: evita ciclo
+
+        orden = self.obtener(orden_id)
+        motorizado_id = orden.get("motorizado_id")
+        if not motorizado_id:
+            raise OrdenError(
+                f"La orden {orden_id} no tiene motorizado asignado: no se puede entregar.")
         self.cambiar_estado(orden_id, "ENTREGADA_AL_MOTORIZADO", usuario)
+        inv = InventoryService(self._db)
         for item in self.items(orden_id):
             pid = str(item["product_id"])
             if pid in entregadas:
                 ent = float(entregadas[pid])
                 self._actualizar_items(item["id"], ent, ent, 0.0, 0.0)
+                if ent > 0:
+                    inv.transferir_a_motorizado(
+                        motorizado_id=motorizado_id, product_id=item["product_id"],
+                        cantidad=ent, orden_id=orden_id, usuario=usuario,
+                        idempotency_key=f"ent-{orden_id}-{pid}")
         return self.obtener(orden_id)
 
     def completar(self, orden_id: int, colocadas: Dict[str, float],
@@ -192,7 +211,9 @@ class OrderService:
                         f"No se puede colocar ({colocada:g}) más de lo llevado "
                         f"({llevada:g}) en el producto {pid}."
                     )
-                self._actualizar_items(item["id"], 0.0, llevada, colocada,
+                # Conserva lo entregado (antes se pisaba con 0 al cerrar).
+                entregada = float(item.get("cantidad_entregada") or 0)
+                self._actualizar_items(item["id"], entregada, llevada, colocada,
                                       round(llevada - colocada, 2))
         return self.cambiar_estado(orden_id, "COMPLETADA", usuario)
 

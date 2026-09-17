@@ -37,7 +37,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA vendu TO authenticated;
 ALTER DEFAULT PRIVILEGES IN SCHEMA vendu GRANT SELECT ON TABLES TO authenticated;
 
 -- ---------- 1. Helper de rol ----------
-DROP FUNCTION IF EXISTS vendu.es_supervisor();
+-- (sin DROP: las políticas vdz_* dependen de esta función y el DROP sin CASCADE
+--  hacía fallar la segunda corrida del archivo. CREATE OR REPLACE basta.)
 CREATE OR REPLACE FUNCTION vendu.es_supervisor()
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER
@@ -221,6 +222,7 @@ DECLARE
   v_key    text;
   v_reparto jsonb := '[]'::jsonb;
   v_colocadas jsonb := COALESCE(p_colocadas, '{}'::jsonb);
+  v_sin_capacidad numeric := 0;   -- unidades que NO cupieron en ningún canal
 BEGIN
   SELECT * INTO v_orden FROM vendu.replenishment_orders WHERE id = p_orden_id;
   IF NOT FOUND THEN
@@ -298,14 +300,25 @@ BEGIN
           'movimiento_id', v_mov_id);
         v_cant := round(v_cant - v_asig, 2);
       END LOOP;
+      -- Lo que no cupo en ningún canal NO se da por colocado.
+      IF v_cant > 0 THEN
+        v_sin_capacidad := v_sin_capacidad + v_cant;
+        v_target := round(v_target - v_cant, 2);
+      END IF;
     END IF;
 
-    -- Registra lo colocado (total) y sobrante por ítem
+    -- Registra lo colocado (total real) y sobrante por ítem
     UPDATE vendu.replenishment_order_items
        SET cantidad_colocada = round(v_target,2),
            sobrante = round(v_linea.cantidad_llevada - v_target, 2)
      WHERE id = v_linea.id;
   END LOOP;
+
+  -- Antes se marcaba COMPLETADA aunque no se hubiera movido ni una unidad.
+  IF v_sin_capacidad > 0 AND jsonb_array_length(v_reparto) = 0 THEN
+    RAISE EXCEPTION 'No hay capacidad libre en los canales de la máquina % para colocar % unidades; la orden sigue EN_MAQUINA',
+      v_orden.maquina_id, v_sin_capacidad;
+  END IF;
 
   UPDATE vendu.replenishment_orders
      SET estado = 'COMPLETADA',
@@ -347,6 +360,10 @@ BEGIN
     RAISE EXCEPTION 'El motorizado no tiene ubicación de inventario';
   END IF;
   SELECT id INTO v_destino FROM vendu.inventory_locations WHERE tipo='PRINCIPAL';
+  IF v_destino IS NULL THEN
+    -- Sin destino el trigger descontaría del motorizado y no sumaría a nadie.
+    RAISE EXCEPTION 'No existe la ubicación PRINCIPAL (oficina); créala antes de devolver';
+  END IF;
 
   INSERT INTO vendu.inventory_movements
     (tipo, product_id, cantidad, origen_id, destino_id, motorizado_id,

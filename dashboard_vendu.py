@@ -73,8 +73,10 @@ def get_catalogo_epay():
 
 
 def query(sql: str, params=None) -> pd.DataFrame:
-    rows = get_db().query(sql, params)
-    return pd.DataFrame(rows)
+    # Con las columnas del cursor, un resultado vacío sigue siendo un
+    # DataFrame con estructura (antes: KeyError 'minimo' con la base vacía).
+    rows, cols = get_db().query_con_columnas(sql, params)
+    return pd.DataFrame(rows, columns=cols)
 
 
 # --------------------------------------------------------------------------- #
@@ -191,25 +193,26 @@ def cargar_ventas(desde: date, hasta: date):
 def cargar_recomendaciones():
     df = query(
         """
-        SELECT * FROM (
-          SELECT r.id, r.maquina_id, m.nombre AS maquina_nombre, r.product_id,
-                 p.nombre AS producto, r.consumo_promedio_diario,
-                 r.consumo_promedio_7_dias, r.consumo_promedio_14_dias,
-                 r.consumo_promedio_30_dias, r.tendencia, r.stock_actual,
-                 r.dias_cobertura, r.stock_objetivo, r.margen_seguridad,
-                 r.cantidad_recomendada, r.motivo, r.calculado_en,
-                 row_number() OVER (
-                   PARTITION BY r.maquina_id ORDER BY r.calculado_en DESC) AS rn
-          FROM vendu.replenishment_recommendations r
-          LEFT JOIN public.maquinas m ON m.id = r.maquina_id
-          LEFT JOIN vendu.products p ON p.id = r.product_id
-        ) t WHERE rn = 1
-        ORDER BY t.maquina_id, t.producto
+        SELECT r.id, r.maquina_id, m.nombre AS maquina_nombre, r.product_id,
+               p.nombre AS producto, r.consumo_promedio_diario,
+               r.consumo_promedio_7_dias, r.consumo_promedio_14_dias,
+               r.consumo_promedio_30_dias, r.tendencia, r.stock_actual,
+               r.dias_cobertura, r.stock_objetivo, r.margen_seguridad,
+               r.cantidad_recomendada, r.motivo, r.calculado_en
+        FROM vendu.replenishment_recommendations r
+        LEFT JOIN public.maquinas m ON m.id = r.maquina_id
+        LEFT JOIN vendu.products p ON p.id = r.product_id
+        -- Último LOTE de cada máquina (todas sus filas). Antes se quedaba con
+        -- UNA sola fila por máquina: todo el lote comparte calculado_en.
+        WHERE r.calculado_en = (
+          SELECT max(r2.calculado_en) FROM vendu.replenishment_recommendations r2
+          WHERE r2.maquina_id = r.maquina_id)
+        ORDER BY r.maquina_id, p.nombre
         """
     )
     if df.empty:
         return df
-    res = df.drop(columns=["rn"], errors="ignore")
+    res = df
     cols = [c for c in (
         "consumo_promedio_diario", "consumo_promedio_7_dias",
         "consumo_promedio_14_dias", "consumo_promedio_30_dias",
@@ -1090,9 +1093,45 @@ SECCIONES_NAV = {
     "sincronizacion": ":material/sync: Sincronización",
 }
 
+# --------------------------------------------------------------------------- #
+# Acceso mínimo (fase 1, 17-09-2026): PIN de supervisor guardado en st.secrets.
+# El login por usuario llega con el Plan 2; mientras tanto, sin PIN no se ve nada.
+# --------------------------------------------------------------------------- #
+def _pin_configurado() -> str:
+    try:
+        return str(st.secrets.get("SUPERVISOR_PIN", "") or "")
+    except Exception:  # sin secrets.toml
+        return os.getenv("SUPERVISOR_PIN", "")
+
+
+def exigir_pin() -> None:
+    import hmac
+
+    pin = _pin_configurado()
+    if not pin:
+        st.error("Falta SUPERVISOR_PIN en los secretos: el panel queda cerrado.")
+        st.stop()
+    if st.session_state.get("pin_ok"):
+        return
+    st.markdown("# :material/package_2: **VENDU** · Panel operativo")
+    with st.form("pin_supervisor"):
+        ingresado = st.text_input("Clave de supervisor", type="password")
+        if st.form_submit_button("Entrar"):
+            if hmac.compare_digest(ingresado.strip(), pin):
+                st.session_state["pin_ok"] = True
+                st.rerun()
+            st.error("Clave incorrecta.")
+    st.stop()
+
+
+exigir_pin()
+
 with st.sidebar:
     st.markdown("# :material/package_2: **VENDU**")
     st.caption("Panel operativo — inventario y recargas")
+    if st.button("Salir", type="tertiary"):
+        st.session_state["pin_ok"] = False
+        st.rerun()
     seccion = st.radio(
         "Sección",
         list(SECCIONES_NAV),

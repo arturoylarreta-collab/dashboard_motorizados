@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS vendu.products (
   id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   codigo_epay  text UNIQUE,
   nombre       text NOT NULL,
-  nombre_norm  text NOT NULL UNIQUE,
+  nombre_norm  text NOT NULL,   -- NO único: el catálogo de ePay repite nombres (popsocket x7, guayoyo...); ver índice abajo
   categoria    text,
   precio_bs    numeric(14,2),
   precio_usd   numeric(14,2),
@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS vendu.inventory_movements (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   tipo            text NOT NULL,
   product_id      bigint NOT NULL REFERENCES vendu.products(id),
-  cantidad        numeric NOT NULL CHECK (cantidad <> 0),
+  cantidad        numeric NOT NULL CHECK (cantidad > 0),   -- el sentido lo dan origen/destino; un negativo esquivaba la validación
   origen_id       bigint REFERENCES vendu.inventory_locations(id),
   destino_id      bigint REFERENCES vendu.inventory_locations(id),
   motorizado_id   uuid REFERENCES public.motorizados(auth_user_id),
@@ -272,28 +272,32 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  -- Saldo del origen bloqueado (FOR UPDATE) y actualización RELATIVA: dos
+  -- movimientos concurrentes sobre el mismo producto ya no se pisan.
   IF NEW.origen_id IS NOT NULL THEN
     SELECT quantity INTO v_antes FROM vendu.inventory_balances
-     WHERE location_id = NEW.origen_id AND product_id = NEW.product_id;
+     WHERE location_id = NEW.origen_id AND product_id = NEW.product_id
+     FOR UPDATE;
     v_antes := COALESCE(v_antes, 0);
     IF v_antes - NEW.cantidad < 0 THEN
       RAISE EXCEPTION 'Inventario negativo en origen (location_id=%, producto=%): disponible=%, salida=%',
         NEW.origen_id, NEW.product_id, v_antes, NEW.cantidad;
     END IF;
+    -- Si no había fila, v_antes = 0 y ya se lanzó la excepción de arriba; el
+    -- INSERT solo llega aquí cuando la fila existe (ON CONFLICT). Se propone 0 y
+    -- no -cantidad porque Postgres evalúa el CHECK quantity >= 0 sobre la fila
+    -- propuesta ANTES de resolver el conflicto.
     INSERT INTO vendu.inventory_balances (location_id, product_id, quantity, updated_at)
-    VALUES (NEW.origen_id, NEW.product_id, v_antes - NEW.cantidad, now())
+    VALUES (NEW.origen_id, NEW.product_id, 0, now())
     ON CONFLICT (location_id, product_id)
-    DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now();
+    DO UPDATE SET quantity = vendu.inventory_balances.quantity - NEW.cantidad, updated_at = now();
   END IF;
 
   IF NEW.destino_id IS NOT NULL THEN
-    SELECT quantity INTO v_antes FROM vendu.inventory_balances
-     WHERE location_id = NEW.destino_id AND product_id = NEW.product_id;
-    v_antes := COALESCE(v_antes, 0);
     INSERT INTO vendu.inventory_balances (location_id, product_id, quantity, updated_at)
-    VALUES (NEW.destino_id, NEW.product_id, v_antes + NEW.cantidad, now())
+    VALUES (NEW.destino_id, NEW.product_id, NEW.cantidad, now())
     ON CONFLICT (location_id, product_id)
-    DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now();
+    DO UPDATE SET quantity = vendu.inventory_balances.quantity + NEW.cantidad, updated_at = now();
   END IF;
 
   INSERT INTO vendu.audit_logs (usuario, accion, entidad, entidad_id, despues, origen, destino, referencia, maquina_id, product_id)

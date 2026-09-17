@@ -10,9 +10,11 @@ Protocolo MCP (Streamable HTTP, respuestas SSE):
   2. POST "notifications/initialized" (mismo session-id).
   3. En adelante cada `tools/call` incluye ese `mcp-session-id` + el token.
 
-Configuración (NUNCA en el repo):
-  MCP_URL    = https://mcp.datalusions.online/mcp
-  MCP_TOKEN  = token de la cuenta Vendu (x-epay-token / Authorization: Bearer)
+Configuración (NUNCA en el repo; en st.secrets o variables de entorno):
+  MCP_URL    = servidor del MCP de Vendu en Render + MCP_PATH
+               (epayuno-mcp-1oty.onrender.com/<MCP_PATH>; los valores están en
+               C:/MCP/_render-epay-tokens-SECRET.txt y _mcp-write-token-SECRET.txt)
+  MCP_TOKEN  = token de lectura (53 tools) o de escritura (57 tools), Authorization: Bearer
 
 Garantías:
   * Re-intenta con backoff ante timeouts/errores de red.

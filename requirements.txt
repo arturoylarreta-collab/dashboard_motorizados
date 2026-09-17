@@ -1,7 +1,8 @@
-streamlit
-pandas
-supabase
-beautifulsoup4
-requests
-psycopg2-binary
-pydeck
+# Versiones fijadas el 17-09-2026 (fase 1): sin esto cada deploy instalaba lo último.
+streamlit==1.64.0
+pandas==3.0.5
+supabase==2.31.0
+beautifulsoup4==4.15.0
+requests==2.34.2
+psycopg2-binary==2.9.13
+pydeck==0.9.3
