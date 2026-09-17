@@ -146,10 +146,15 @@ class EpaySync:
 
     def registrar_entrada(self, *, product_id: int, cantidad: float, usuario: Optional[str] = None,
                           nota: Optional[str] = None, idempotency_key: Optional[str] = None,
-                          escribir_epay: bool = True) -> Dict[str, Any]:
-        """ENTRADA_COMPRA en Vendu + `sumar` en el almacén de ePay (una sola vez por movimiento)."""
+                          escribir_epay: bool = True, proveedor_id: Optional[int] = None) -> Dict[str, Any]:
+        """ENTRADA_COMPRA en Vendu + `sumar` en el almacén de ePay (una sola vez por movimiento).
+        `proveedor_id`: de quién vino la mercancía (vendu.proveedores, SQL 12)."""
         mov = self.inv.entrada_compra(product_id=product_id, cantidad=cantidad, usuario=usuario,
                                       idempotency_key=idempotency_key)
+        if proveedor_id and mov and mov.get("id"):
+            self.db.execute("UPDATE vendu.inventory_movements SET proveedor_id = %s WHERE id = %s AND proveedor_id IS NULL",
+                            (proveedor_id, mov["id"]))
+            mov["proveedor_id"] = proveedor_id
         sync = None
         if escribir_epay:
             sync = self.sincronizar_almacen(movimiento_id=mov["id"], product_id=product_id,

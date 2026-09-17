@@ -596,27 +596,83 @@ def _oficina_epay() -> None:
     if not con_epay:
         st.warning("Sin token de escritura del MCP: las entradas y conteos solo se registran en Vendu, no en ePay.")
 
+    # Proveedores (SQL 12): al registrar una entrada se elige el proveedor y solo
+    # aparecen sus productos. "Todos" muestra el catálogo completo.
+    proveedores = query("SELECT id, nombre FROM vendu.proveedores WHERE activo ORDER BY nombre")
+    prov_nombres = {int(r["id"]): str(r["nombre"]) for _, r in proveedores.iterrows()} if not proveedores.empty else {}
+    prov_productos = query("SELECT proveedor_id, product_id FROM vendu.proveedor_productos")
+
     c1, c2 = st.columns(2)
     with c1, st.expander(":material/add_box: Registrar entrada de mercancía a la oficina"):
+        prov_sel = st.selectbox("Proveedor:", [0] + list(prov_nombres),
+                                format_func=lambda i: "Todos los productos" if i == 0 else prov_nombres[i],
+                                key="ent_prov")
+        if prov_sel:
+            ids_prov = set(int(x) for x in prov_productos.loc[prov_productos["proveedor_id"] == prov_sel, "product_id"]) \
+                if not prov_productos.empty else set()
+            ids_filtrados = [i for i in ids if i in ids_prov]
+            if not ids_filtrados:
+                st.info(f"{prov_nombres[prov_sel]} todavía no tiene productos asignados. Asígnalos en «Productos por proveedor» abajo.")
+        else:
+            ids_filtrados = ids
         with st.form("entrada_oficina"):
-            pid = st.selectbox("Producto:", ids, format_func=lambda i: etiquetas[i], key="ent_pid")
+            pid = st.selectbox("Producto:", ids_filtrados or ids, format_func=lambda i: etiquetas[i], key="ent_pid")
             cant = st.number_input("Unidades que entran:", min_value=1, step=1, value=1, key="ent_cant")
-            nota = st.text_input("Nota (factura, proveedor):", key="ent_nota")
+            nota = st.text_input("Nota (número de factura):", key="ent_nota")
             if st.form_submit_button(":material/save: Registrar entrada", type="primary"):
                 try:
                     if con_epay:
-                        r = sync.registrar_entrada(product_id=int(pid), cantidad=float(cant), usuario="dashboard", nota=nota or None)
+                        r = sync.registrar_entrada(product_id=int(pid), cantidad=float(cant), usuario="dashboard",
+                                                   nota=nota or None, proveedor_id=int(prov_sel) or None)
                         ep = r.get("epay") or {}
                         if ep.get("estado") == "OK":
                             st.success(f"Entrada registrada en Vendu y en el almacén de ePay ({ep['respuesta'].get('modo', 'ok')}).")
                         else:
                             st.warning(f"Entrada registrada en Vendu; ePay quedó PENDIENTE: {ep.get('error')}")
                     else:
-                        get_inventory().entrada_compra(product_id=int(pid), cantidad=float(cant), usuario="dashboard")
+                        from epay_sync import EpaySync
+                        EpaySync(get_db(), None).registrar_entrada(product_id=int(pid), cantidad=float(cant), usuario="dashboard",
+                                                                    nota=nota or None, proveedor_id=int(prov_sel) or None,
+                                                                    escribir_epay=False)
                         st.success("Entrada registrada en Vendu.")
                     st.cache_data.clear()
                 except Exception as ex:
                     st.error(f"No se registró: {ex}")
+    with st.expander(":material/local_shipping: Productos por proveedor (qué vende cada uno)"):
+        st.caption("Marca los productos de cada proveedor; así al cargar una factura solo aparecen los suyos.")
+        if not prov_nombres:
+            st.info("No hay proveedores. Corre el SQL 12 o agrega uno abajo.")
+        pa, pb = st.columns([2, 1])
+        with pa:
+            prov_edit = st.selectbox("Proveedor a editar:", list(prov_nombres), format_func=lambda i: prov_nombres[i],
+                                     key="prov_edit") if prov_nombres else None
+            if prov_edit:
+                actuales = [int(x) for x in prov_productos.loc[prov_productos["proveedor_id"] == prov_edit, "product_id"]] \
+                    if not prov_productos.empty else []
+                nuevos = st.multiselect("Productos de este proveedor:", ids, default=[i for i in actuales if i in ids],
+                                        format_func=lambda i: etiquetas[i], key=f"prov_prods_{prov_edit}")
+                if st.button(":material/save: Guardar productos del proveedor", key="prov_guardar"):
+                    try:
+                        with get_db().transaccion():
+                            get_db().execute("DELETE FROM vendu.proveedor_productos WHERE proveedor_id = %s", (prov_edit,))
+                            for i in nuevos:
+                                get_db().execute("INSERT INTO vendu.proveedor_productos (proveedor_id, product_id) VALUES (%s, %s) "
+                                                 "ON CONFLICT DO NOTHING", (prov_edit, int(i)))
+                        st.success(f"{prov_nombres[prov_edit]}: {len(nuevos)} producto(s).")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"No se guardó: {ex}")
+        with pb:
+            nuevo_prov = st.text_input("Nuevo proveedor:", key="prov_nuevo")
+            if st.button(":material/add: Agregar proveedor", key="prov_add") and nuevo_prov.strip():
+                try:
+                    get_db().execute("INSERT INTO vendu.proveedores (nombre) VALUES (%s) ON CONFLICT (nombre) DO NOTHING",
+                                     (nuevo_prov.strip(),))
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"No se agregó: {ex}")
     with c2, st.expander(":material/fact_check: Conteo físico de la oficina (arranque y auditoría)"):
         st.caption("Fija el stock de la oficina en Vendu y, si hay token, el almacén de ePay = contado + lo que va en los bolsos.")
         with st.form("conteo_oficina"):
