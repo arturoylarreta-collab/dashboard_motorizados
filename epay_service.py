@@ -11,9 +11,11 @@ Protocolo MCP (Streamable HTTP, respuestas SSE):
   3. En adelante cada `tools/call` incluye ese `mcp-session-id` + el token.
 
 Configuración (NUNCA en el repo; en st.secrets o variables de entorno):
-  MCP_URL    = servidor del MCP de Vendu en Render + MCP_PATH
-               (epayuno-mcp-1oty.onrender.com/<MCP_PATH>; los valores están en
-               C:/MCP/_render-epay-tokens-SECRET.txt y _mcp-write-token-SECRET.txt)
+  MCP_URL    = servidor del MCP de Vendu en Railway + MCP_PATH (desde 18-09-2026; antes Render)
+               (epayuno-mcp-production.up.railway.app/<MCP_PATH>; la ruta y los tokens
+               están en las variables del servicio en Railway)
+               El MCP de Neptuno (aeropuerto) vive en
+               epay-neptuno-mcp-production.up.railway.app (NEPTUNO_MCP_URL / NEPTUNO_MCP_TOKEN).
   MCP_TOKEN  = token de lectura (53 tools) o de escritura (57 tools), Authorization: Bearer
 
 Garantías:
