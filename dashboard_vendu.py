@@ -108,6 +108,21 @@ def query(sql: str, params=None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _tablas_vendu() -> set:
+    df = query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'vendu'")
+    return set(df["table_name"]) if not df.empty else set()
+
+
+def _faltan_tablas(tablas, sql_archivo: str) -> bool:
+    """True (y avisa) si la base aún no tiene esas tablas: falta correr ese SQL en Supabase."""
+    faltan = [x for x in tablas if x not in _tablas_vendu()]
+    if faltan:
+        st.info(f"Esta base todavía no tiene {', '.join(faltan)}. Falta correr "
+                f"`supabase/{sql_archivo}` en Supabase; el resto del inventario funciona igual.")
+    return bool(faltan)
+
+
 # --------------------------------------------------------------------------- #
 # Cargadores (cache TTL: los datos de ePay cambian solo al sincronizar)
 # --------------------------------------------------------------------------- #
@@ -596,6 +611,8 @@ def _oficina_epay() -> None:
     if not con_epay:
         st.warning("Sin token de escritura del MCP: las entradas y conteos solo se registran en Vendu, no en ePay.")
 
+    if _faltan_tablas(["proveedores", "proveedor_productos", "epay_almacen_sync"], "11_epay_recargas.sql y 12_proveedores.sql"):
+        return
     # Proveedores (SQL 12): al registrar una entrada se elige el proveedor y solo
     # aparecen sus productos. "Todos" muestra el catálogo completo.
     proveedores = query("SELECT id, nombre FROM vendu.proveedores WHERE activo ORDER BY nombre")
@@ -1217,6 +1234,8 @@ def _movimientos_epay() -> None:
                     st.info("Sin movimientos recientes para ese producto.")
             except Exception as ex:
                 st.error(f"No se pudo consultar: {ex}")
+    if _faltan_tablas(["epay_recargas"], "11_epay_recargas.sql"):
+        return
     with st.expander(":material/cloud_upload: Recargas escritas en ePay desde este dashboard"):
         rec = query(
             "SELECT r.created_at, r.orden_id, m.nombre AS maquina, r.modo, r.lote, r.usuario, r.error "
