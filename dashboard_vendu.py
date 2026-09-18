@@ -104,7 +104,17 @@ def get_catalogo_epay():
 def query(sql: str, params=None) -> pd.DataFrame:
     # Con las columnas del cursor, un resultado vacío sigue siendo un
     # DataFrame con estructura (antes: KeyError 'minimo' con la base vacía).
-    rows, cols = get_db().query_con_columnas(sql, params)
+    try:
+        rows, cols = get_db().query_con_columnas(sql, params)
+    except Exception as ex:
+        # Sin conexión (clave cambiada, base caída): aviso claro en vez de una traza.
+        if type(ex).__name__ in ("OperationalError", "InterfaceError"):
+            motivo = "la clave de la base ya no es válida" if "password authentication" in str(ex)                 else "la base no responde"
+            st.error(f"No se pudo conectar a la base de datos del inventario: {motivo}. "
+                     "Hay que actualizar DATABASE_URL en las variables del servicio. "
+                     "El resto del tablero sigue funcionando.")
+            st.stop()
+        raise
     return pd.DataFrame(rows, columns=cols)
 
 
